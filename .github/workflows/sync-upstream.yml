@@ -1,0 +1,45 @@
+name: Auto Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get upstream repo
+        id: upstream
+        run: |
+          UP=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}")
+          echo "$UP" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['parent']['full_name'] if d.get('parent') else '')" > /tmp/up.txt
+          echo "upstream=$(cat /tmp/up.txt)" >> $GITHUB_OUTPUT
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Sync from upstream
+        run: |
+          UP="${{ steps.upstream.outputs.upstream }}"
+          if [ -z "$UP" ]; then
+            echo "No upstream parent, skip."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/$UP.git"
+          git fetch upstream
+          BR=$(git symbolic-ref --short HEAD)
+          if git merge-base --is-ancestor upstream/$BR HEAD; then
+            echo "Already up to date"
+            exit 0
+          fi
+          if git merge upstream/$BR --no-edit; then
+            git push origin HEAD
+          else
+            echo "Merge conflict, abort"
+            git merge --abort
+          fi
