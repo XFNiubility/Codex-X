@@ -2,6 +2,7 @@ name: Auto Sync Upstream
 
 on:
   schedule:
+    # 每天 08:00 UTC（北京时间 16:00）
     - cron: '0 8 * * *'
   workflow_dispatch:
 
@@ -9,37 +10,35 @@ permissions:
   contents: write
 
 jobs:
-  sync-upstream:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Get upstream repo
-        id: upstream
-        run: |
-          UP=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}")
-          echo "$UP" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['parent']['full_name'] if d.get('parent') else '')" > /tmp/up.txt
-          echo "upstream=$(cat /tmp/up.txt)" >> $GITHUB_OUTPUT
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Sync from upstream
-        run: |
-          UP="${{ steps.upstream.outputs.upstream }}"
-          if [ -z "$UP" ]; then
-            echo "No upstream parent, skip."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "https://github.com/$UP.git"
-          git fetch upstream
-          BR=$(git symbolic-ref --short HEAD)
-          if git merge-base --is-ancestor upstream/$BR HEAD; then
-            echo "Already up to date"
-            exit 0
-          fi
-          if git merge upstream/$BR --no-edit; then
-            git push origin HEAD
-          else
-            echo "Merge conflict, abort"
-            git merge --abort
-          fi
+
+      - name: Sync upstream (only when upstream has new commits)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const repo = context.repo;
+            const { data: fork } = await github.rest.repos.get({ owner: repo.owner, repo: repo.repo });
+            const parent = fork.parent;
+            if (!parent) {
+              console.log('No upstream parent, skip.');
+              return;
+            }
+            const upstream = `${parent.owner.login}/${parent.name}`;
+            const branch = parent.default_branch;
+            const runGit = require('child_process').execSync;
+
+            runGit(`git remote add upstream https://github.com/${upstream}.git`, { stdio: 'inherit' });
+            runGit(`git fetch upstream ${branch}`, { stdio: 'inherit' });
+            const behind = runGit(`git rev-list --count HEAD..upstream/${branch}`).toString().trim();
+            if (behind === '0') {
+              console.log(`Upstream ${upstream} has no new commits, skip sync. No changes pushed.`);
+              return;
+            }
+            runGit(`git merge upstream/${branch} --no-edit`, { stdio: 'inherit' });
+            runGit(`git push origin ${branch}`, { stdio: 'inherit' });
+            console.log(`Synced ${behind} new commits from ${upstream}.`);
